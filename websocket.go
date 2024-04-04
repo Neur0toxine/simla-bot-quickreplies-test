@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/gorilla/websocket"
 	v1 "github.com/retailcrm/mg-bot-api-client-go/v1"
@@ -46,6 +47,15 @@ func (l *WebsocketListener) Listen() error {
 	data, header, err := l.mg.WsMeta([]string{v1.WsEventMessageNew})
 	if err != nil {
 		return fmt.Errorf("cannot get meta for connection: %w", err)
+	}
+
+	if strings.HasPrefix(data, "http:") {
+		log.Println("warning: found http: in the URL - replacing with ws:")
+		data = "ws:" + data[5:]
+	}
+	if strings.HasPrefix(data, "https:") {
+		log.Println("warning: found https: in the URL - replacing with wss:")
+		data = "wss:" + data[6:]
 	}
 
 	ws, _, err := websocket.DefaultDialer.Dial(data, header)
