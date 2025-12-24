@@ -31,7 +31,7 @@ func updateIntegrationModule(apiURL, apiKey, code, name string) (string, string,
 			return "", "", nErr
 		}
 	}
-	return resp.Info.MgBotInfo.EndpointUrl, resp.Info.MgBotInfo.Token, nil
+	return strings.TrimRight(resp.Info.MgBotInfo.EndpointUrl, "/"), resp.Info.MgBotInfo.Token, nil
 }
 
 func normalizeAPIError(err *errs.Failure) error {

@@ -1,107 +1,105 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
+	"context"
 	"log"
-	"strings"
+	"regexp"
 
-	"github.com/gorilla/websocket"
-	v1 "github.com/retailcrm/mg-bot-api-client-go/v1"
+	mgbot "github.com/retailcrm/bot-api-client-go"
+	mgbotws "github.com/retailcrm/bot-api-client-go/ws"
 )
 
 type WebsocketListener struct {
-	mg          *v1.MgClient
-	ws          *websocket.Conn
+	ctx         context.Context
+	ws          *mgbotws.AppController
+	mg          mgbot.ClientInterface
 	scope       string
-	suggestions []v1.Suggestion
+	trigger     string
+	suggestions []mgbot.Suggestion
 }
 
-func NewWebsocketListener(endpoint, token, scope string, textOptions []string) *WebsocketListener {
-	suggestions := []v1.Suggestion{
+func NewWebsocketListener(endpoint, token, trigger, scope string, textOptions []string) *WebsocketListener {
+	suggestions := []mgbot.Suggestion{
 		{
-			Type:  v1.SuggestionTypePhone,
+			Type:  mgbot.SuggestionTypePhone,
 			Title: "Phone",
 		},
 		{
-			Type:  v1.SuggestionTypeEmail,
+			Type:  mgbot.SuggestionTypeEmail,
 			Title: "E-Mail",
 		},
 	}
 
 	for _, s := range textOptions {
-		suggestions = append(suggestions, v1.Suggestion{
-			Type:  v1.SuggestionTypeText,
+		suggestions = append(suggestions, mgbot.Suggestion{
+			Type:  mgbot.SuggestionTypeText,
 			Title: s,
 		})
 	}
 
+	uri := endpoint + "/api/bot/v1/"
+	mg, err := mgbot.NewClientWithResponses(uri, mgbot.WithBotToken(token))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	ws, err := mgbotws.NewController(regexp.MustCompile(`^http(s)?\:`).ReplaceAllString(uri, "ws$1:")+"ws", token)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	return &WebsocketListener{
-		mg:          v1.New(endpoint, token),
+		ws:          ws,
+		mg:          mg,
 		scope:       scope,
+		trigger:     trigger,
 		suggestions: suggestions,
 	}
 }
 
-func (l *WebsocketListener) Listen() error {
-	data, header, err := l.mg.WsMeta([]string{v1.WsEventMessageNew})
-	if err != nil {
-		return fmt.Errorf("cannot get meta for connection: %w", err)
-	}
-
-	if strings.HasPrefix(data, "http:") {
-		log.Println("warning: found http: in the URL - replacing with ws:")
-		data = "ws:" + data[5:]
-	}
-	if strings.HasPrefix(data, "https:") {
-		log.Println("warning: found https: in the URL - replacing with wss:")
-		data = "wss:" + data[6:]
-	}
-
-	ws, _, err := websocket.DefaultDialer.Dial(data, header)
-	if err != nil {
-		return fmt.Errorf("cannot estabilish WebSocket connection to %s: %w", data, err)
-	}
-
+func (l *WebsocketListener) Listen(ctx context.Context) error {
 	log.Println("Listening for the new messages...")
 
-	for {
-		var wsEvent v1.WsEvent
-		if err := ws.ReadJSON(&wsEvent); err != nil {
-			log.Fatal("unexpected websocket error:", err)
+	return l.ws.SubscribeToReceiveEventsOperation(ctx, mgbotws.EventsChannelParameters{
+		Events: "message_new",
+	}, func(ctx context.Context, event mgbotws.EventMessageFromEventsChannel) error {
+		wh, ok := event.Payload.Data.(mgbotws.MessageDataSchema)
+		if !ok {
+			return nil
 		}
 
-		var event v1.WsEventMessageNewData
-		err = json.Unmarshal(wsEvent.Data, &event)
-		if err != nil {
-			log.Printf("cannot unmarshal payload: %s\n", err)
-			continue
+		if wh.Message.From != nil && wh.Message.From.Type != mgbotws.UserTypeCustomer {
+			return nil
 		}
 
-		if event.Message == nil {
-			log.Print("invalid payload - nil message")
-			continue
+		if l.trigger != "" && wh.Message.Content != nil && *wh.Message.Content != l.trigger {
+			return nil
 		}
 
-		if event.Message.From != nil && event.Message.From.Type != "customer" {
-			continue
+		if wh.Message.From != nil {
+			log.Printf("Received message from %s with id=%d\n", wh.Message.From.Name, wh.Message.Id)
+		} else {
+			log.Printf("Received message with id=%d\n", wh.Message.Id)
 		}
 
-		log.Printf("Received message from %s with id=%d\n", event.Message.From.Name, event.Message.ID)
-
-		_, _, err := l.mg.MessageSend(v1.MessageSendRequest{
-			Type:    v1.MsgTypeText,
-			Content: "The quick brown fox jumps over the lazy dog.",
-			// Items:                nil,
-			Scope:          l.scope,
-			ChatID:         event.Message.ChatID,
-			QuoteMessageId: event.Message.ID,
-			TransportAttachments: &v1.TransportAttachments{
+		_, err := l.mg.SendMessage(context.Background(), mgbot.SendMessageJSONRequestBody{
+			Type:           ptr(mgbot.MessageTypeText),
+			Content:        ptr("The quick brown fox jumps over the lazy dog."),
+			Scope:          mgbot.MessageScope(l.scope),
+			ChatID:         wh.Message.ChatId,
+			QuoteMessageID: wh.Message.Id,
+			TransportAttachments: &mgbot.MessageTransportAttachments{
 				Suggestions: l.suggestions,
 			},
 		})
 		if err != nil {
 			log.Printf("error: cannot respond to the message: %s\n", err)
 		}
-	}
+
+		return nil
+	})
+}
+
+func ptr[T any](v T) *T {
+	return &v
 }

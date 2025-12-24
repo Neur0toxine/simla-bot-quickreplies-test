@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
-	v1 "github.com/retailcrm/mg-bot-api-client-go/v1"
+	mgbot "github.com/retailcrm/bot-api-client-go"
 )
 
 func main() {
@@ -27,6 +31,7 @@ func main() {
 
 	botCode := os.Getenv("BOT_CODE")
 	botName := os.Getenv("BOT_NAME")
+	trigger := os.Getenv("BOT_TRIGGER")
 	msgScope := os.Getenv("MESSAGE_SCOPE")
 	options := os.Getenv("TEXT_OPTIONS")
 
@@ -37,7 +42,7 @@ func main() {
 		botName = "Test Quick Reply Bot"
 	}
 	if msgScope == "" {
-		msgScope = v1.MessageScopePrivate
+		msgScope = string(mgbot.MessageScopePrivate)
 	}
 	if options == "" {
 		options = "Text reply"
@@ -50,7 +55,33 @@ func main() {
 
 	log.Println("Integration module has been updated. Endpoint: ", endpoint, ", token: ", token)
 
-	if err := NewWebsocketListener(endpoint, token, msgScope, strings.Split(options, ",")).Listen(); err != nil {
-		log.Fatal(err)
+	stopCh := make(chan struct{}, 1)
+	stop := func() {
+		stopCh <- struct{}{}
+		close(stopCh)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		defer stop()
+		if err := NewWebsocketListener(endpoint, token, trigger, msgScope, strings.Split(options, ",")).Listen(ctx); err != nil {
+			log.Fatal("listen error: ", err)
+		}
+	}()
+
+	c := make(chan os.Signal, 1)
+	signal.Notify(c)
+	for sig := range c {
+		switch sig {
+		case os.Interrupt, syscall.SIGQUIT, syscall.SIGTERM:
+			cancel()
+			select {
+			case <-stopCh:
+				return
+			case <-time.After(time.Second * 5):
+				log.Fatal("did not stop gracefully after 5 seconds")
+			}
+		default:
+		}
 	}
 }
